@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>3D Boids Simulation</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Segoe UI',system-ui,sans-serif;}
+  canvas{display:block;}
+  #ui{position:fixed;top:16px;left:16px;z-index:10;color:#e0e0e0;pointer-events:none;}
+  #fps{font-size:13px;opacity:.7;margin-bottom:8px;font-variant-numeric:tabular-nums;}
+  #controls{pointer-events:auto;background:rgba(10,10,18,.82);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:16px 20px;display:flex;flex-direction:column;gap:10px;min-width:220px;}
+  #controls label{display:flex;justify-content:space-between;align-items:center;font-size:13px;gap:12px;}
+  #controls input[type=range]{flex:1;accent-color:#60a5fa;height:4px;}
+  #controls button{background:rgba(96,165,250,.15);color:#93c5fd;border:1px solid rgba(96,165,250,.25);border-radius:8px;padding:6px 14px;cursor:pointer;font-size:12px;transition:background .2s;}
+  #controls button:hover{background:rgba(96,165,250,.3);}
+  .val{min-width:32px;text-align:right;font-variant-numeric:tabular-nums;color:#93c5fd;font-size:12px;}
+  #title{font-size:15px;font-weight:600;letter-spacing:.5px;margin-bottom:4px;color:#93c5fd;}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="fps">FPS: --</div>
+  <div id="controls">
+    <div id="title">🐦 Boids Controls</div>
+    <label>Boids <span class="val" id="vCount">300</span>
+      <input type="range" id="rCount" min="50" max="800" step="10" value="300"/>
+    </label>
+    <label>Separation <span class="val" id="vSep">1.8</span>
+      <input type="range" id="rSep" min="0" max="5" step="0.1" value="1.8"/>
+    </label>
+    <label>Alignment <span class="val" id="vAli">1.0</span>
+      <input type="range" id="rAli" min="0" max="5" step="0.1" value="1.0"/>
+    </label>
+    <label>Cohesion <span class="val" id="vCoh">0.8</span>
+      <input type="range" id="rCoh" min="0" max="5" step="0.1" value="0.8"/>
+    </label>
+    <label>Speed <span class="val" id="vSpd">4.0</span>
+      <input type="range" id="rSpd" min="1" max="10" step="0.5" value="4"/>
+    </label>
+    <label>View Radius <span class="val" id="vRad">12</span>
+      <input type="range" id="rRad" min="4" max="30" step="1" value="12"/>
+    </label>
+    <button id="btnObs">Hide Obstacles</button>
+    <button id="btnReset">Reset</button>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports":{
+    "three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+    "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+/* ───────────── CONFIG ───────────── */
+const BOUND = 100;
+const HALF = BOUND / 2;
+const MAX_BOIDS = 800;
+let cfg = {
+  count: 300,
+  separation: 1.8,
+  alignment: 1.0,
+  cohesion: 0.8,
+  maxSpeed: 4.0,
+  viewRadius: 12,
+  separationDist: 4,
+  obstacleAvoidDist: 10,
+  obstacleAvoidForce: 6,
+  boundaryForce: 5,
+  boundaryMargin: 5,
+};
+
+/* ───────────── RENDERER ───────────── */
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05060f);
+scene.fog = new THREE.FogExp2(0x05060f, 0.004);
+
+/* ───────────── CAMERA ───────────── */
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.5, 300);
+camera.position.set(80, 60, 80);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0,0,0);
+controls.minDistance = 30;
+controls.maxDistance = 250;
+
+/* ───────────── LIGHTS ───────────── */
+scene.add(new THREE.AmbientLight(0x334466, 1.5));
+const dLight = new THREE.DirectionalLight(0xaaccff, 2);
+dLight.position.set(30, 50, 20);
+scene.add(dLight);
+const pLight = new THREE.PointLight(0x60a5fa, 4, 200);
+pLight.position.set(0,30,0);
+scene.add(pLight);
+
+/* ───────────── BOUNDING BOX VISUAL ───────────── */
+const boxHelper = new THREE.BoxHelper(
+  new THREE.Mesh(new THREE.BoxGeometry(BOUND, BOUND, BOUND)),
+  0x1a2a4a
+);
+boxHelper.material.transparent = true;
+boxHelper.material.opacity = 0.15;
+scene.add(boxHelper);
+
+/* ───────────── GROUND GRID ───────────── */
+const gridH = new THREE.GridHelper(BOUND, 20, 0x162040, 0x0d1525);
+gridH.position.y = -HALF;
+gridH.material.transparent = true;
+gridH.material.opacity = 0.3;
+scene.add(gridH);
+
+/* ───────────── OBSTACLES ───────────── */
+const obstacles = [];
+const obstacleGroup = new THREE.Group();
+scene.add(obstacleGroup);
+
+function createObstacles(){
+  const data = [
+    {pos:[15,8,15], r:5, type:'sphere'},
+    {pos:[-25,-10,-20], r:6, type:'sphere'},
+    {pos:[0,15,-28], r:4.5, type:'sphere'},
+    {pos:[28,-8,-8], r:4, type:'box'},
+    {pos:[-16,18,22], r:4.5, type:'box'},
+    {pos:[-30,-4,12], r:5, type:'sphere'},
+    {pos:[8,-18,-32], r:4, type:'box'},
+  ];
+  const matS = new THREE.MeshStandardMaterial({color:0x4488cc, emissive:0x1144aa, emissiveIntensity:0.4, transparent:true, opacity:0.75, roughness:0.2, metalness:0.7});
+  const matB = new THREE.MeshStandardMaterial({color:0x8855cc, emissive:0x4422aa, emissiveIntensity:0.4, transparent:true, opacity:0.75, roughness:0.2, metalness:0.7});
+  const edgeMatS = new THREE.LineBasicMaterial({color:0x66bbff, transparent:true, opacity:0.6});
+  const edgeMatB = new THREE.LineBasicMaterial({color:0xaa77ff, transparent:true, opacity:0.6});
+  for(const d of data){
+    let mesh, geo;
+    if(d.type==='sphere'){
+      geo = new THREE.SphereGeometry(d.r,20,14);
+      mesh = new THREE.Mesh(geo, matS);
+    } else {
+      geo = new THREE.BoxGeometry(d.r*2,d.r*2,d.r*2);
+      mesh = new THREE.Mesh(geo, matB);
+    }
+    mesh.position.set(...d.pos);
+    obstacleGroup.add(mesh);
+
+    // Wireframe edges for visibility
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geo),
+      d.type==='sphere' ? edgeMatS : edgeMatB
+    );
+    edges.position.copy(mesh.position);
+    obstacleGroup.add(edges);
+
+    // Glow shell (larger, brighter)
+    const glowGeo = d.type==='sphere' ? new THREE.SphereGeometry(d.r*1.3,14,10) : new THREE.BoxGeometry(d.r*2.6,d.r*2.6,d.r*2.6);
+    const glow = new THREE.Mesh(
+      glowGeo,
+      new THREE.MeshBasicMaterial({color: d.type==='sphere' ? 0x4499ff : 0x8855ff, transparent:true, opacity:0.12, side:THREE.BackSide})
+    );
+    glow.position.copy(mesh.position);
+    obstacleGroup.add(glow);
+
+    obstacles.push({x:d.pos[0], y:d.pos[1], z:d.pos[2], r:d.r});
+  }
+}
+createObstacles();
+
+/* ───────────── BOID GEOMETRY (tetrahedron) ───────────── */
+const tetraGeo = new THREE.TetrahedronGeometry(0.45, 0);
+// Rotate base geometry so the "tip" points along +Z
+tetraGeo.rotateX(Math.PI * 0.15);
+
+const boidMat = new THREE.MeshStandardMaterial({
+  color: 0x60c8ff,
+  emissive: 0x2080d0,
+  emissiveIntensity: 0.7,
+  roughness: 0.25,
+  metalness: 0.4,
+});
+
+const instancedMesh = new THREE.InstancedMesh(tetraGeo, boidMat, MAX_BOIDS);
+instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+instancedMesh.count = cfg.count;
+scene.add(instancedMesh);
+
+/* ───────────── BOID DATA (SoA for cache) ───────────── */
+const px = new Float32Array(MAX_BOIDS);
+const py = new Float32Array(MAX_BOIDS);
+const pz = new Float32Array(MAX_BOIDS);
+const vx = new Float32Array(MAX_BOIDS);
+const vy = new Float32Array(MAX_BOIDS);
+const vz = new Float32Array(MAX_BOIDS);
+
+function initBoid(i){
+  px[i] = (Math.random()-0.5)*BOUND*0.8;
+  py[i] = (Math.random()-0.5)*BOUND*0.8;
+  pz[i] = (Math.random()-0.5)*BOUND*0.8;
+  vx[i] = (Math.random()-0.5)*2;
+  vy[i] = (Math.random()-0.5)*2;
+  vz[i] = (Math.random()-0.5)*2;
+}
+for(let i=0;i<MAX_BOIDS;i++) initBoid(i);
+
+/* ───────────── SPATIAL HASH ───────────── */
+const CELL = 12;
+const hashMap = new Map();
+const _key = (cx,cy,cz) => (cx*73856093 ^ cy*19349669 ^ cz*83492791)|0;
+
+function buildSpatialHash(n){
+  hashMap.clear();
+  for(let i=0;i<n;i++){
+    const cx = Math.floor(px[i]/CELL)|0;
+    const cy = Math.floor(py[i]/CELL)|0;
+    const cz = Math.floor(pz[i]/CELL)|0;
+    const k = _key(cx,cy,cz);
+    let bucket = hashMap.get(k);
+    if(!bucket){ bucket=[]; hashMap.set(k,bucket); }
+    bucket.push(i);
+  }
+}
+
+function* neighbors(i, rad){
+  const r = Math.ceil(rad/CELL);
+  const cx0 = Math.floor(px[i]/CELL)|0;
+  const cy0 = Math.floor(py[i]/CELL)|0;
+  const cz0 = Math.floor(pz[i]/CELL)|0;
+  for(let dx=-r;dx<=r;dx++){
+    for(let dy=-r;dy<=r;dy++){
+      for(let dz=-r;dz<=r;dz++){
+        const k = _key(cx0+dx, cy0+dy, cz0+dz);
+        const bucket = hashMap.get(k);
+        if(bucket){
+          for(let q=0;q<bucket.length;q++){
+            const j = bucket[q];
+            if(j!==i) yield j;
+          }
+        }
+      }
+    }
+  }
+}
+
+/* ───────────── STEERING HELPERS ───────────── */
+const _dummy = new THREE.Object3D();
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _up = new THREE.Vector3(0,1,0);
+const _lookDir = new THREE.Vector3();
+const _pos = new THREE.Vector3();
+
+function updateBoids(dt){
+  const n = cfg.count;
+  const radSq = cfg.viewRadius * cfg.viewRadius;
+  const sepDistSq = cfg.separationDist * cfg.separationDist;
+  const maxSpd = cfg.maxSpeed;
+  const maxForce = 0.15;
+
+  buildSpatialHash(n);
+
+  for(let i=0;i<n;i++){
+    let sepX=0, sepY=0, sepZ=0;
+    let aliX=0, aliY=0, aliZ=0;
+    let cohX=0, cohY=0, cohZ=0;
+    let sepCount=0, flockCount=0;
+
+    for(const j of neighbors(i, cfg.viewRadius)){
+      const dx = px[j]-px[i], dy = py[j]-py[i], dz = pz[j]-pz[i];
+      const dSq = dx*dx + dy*dy + dz*dz;
+      if(dSq > radSq || dSq < 0.0001) continue;
+
+      // Separation
+      if(dSq < sepDistSq){
+        const inv = 1/Math.sqrt(dSq);
+        sepX -= dx*inv;
+        sepY -= dy*inv;
+        sepZ -= dz*inv;
+        sepCount++;
+      }
+
+      // Alignment + Cohesion
+      aliX += vx[j]; aliY += vy[j]; aliZ += vz[j];
+      cohX += px[j]; cohY += py[j]; cohZ += pz[j];
+      flockCount++;
+    }
+
+    let fx=0, fy=0, fz=0;
+
+    // Separation
+    if(sepCount > 0){
+      const inv = 1/sepCount;
+      fx += sepX*inv * cfg.separation;
+      fy += sepY*inv * cfg.separation;
+      fz += sepZ*inv * cfg.separation;
+    }
+
+    // Alignment
+    if(flockCount > 0){
+      const inv = 1/flockCount;
+      const ax = aliX*inv - vx[i];
+      const ay = aliY*inv - vy[i];
+      const az = aliZ*inv - vz[i];
+      fx += ax * cfg.alignment;
+      fy += ay * cfg.alignment;
+      fz += az * cfg.alignment;
+    }
+
+    // Cohesion
+    if(flockCount > 0){
+      const inv = 1/flockCount;
+      const cx = cohX*inv - px[i];
+      const cy = cohY*inv - py[i];
+      const cz = cohZ*inv - pz[i];
+      fx += cx * cfg.cohesion * 0.01;
+      fy += cy * cfg.cohesion * 0.01;
+      fz += cz * cfg.cohesion * 0.01;
+    }
+
+    // Boundary containment
+    const margin = cfg.boundaryMargin;
+    const bF = cfg.boundaryForce;
+    if(px[i] > HALF - margin) fx -= bF * ((px[i]-(HALF-margin))/margin);
+    if(px[i] < -HALF + margin) fx += bF * ((-HALF+margin-px[i])/margin);
+    if(py[i] > HALF - margin) fy -= bF * ((py[i]-(HALF-margin))/margin);
+    if(py[i] < -HALF + margin) fy += bF * ((-HALF+margin-py[i])/margin);
+    if(pz[i] > HALF - margin) fz -= bF * ((pz[i]-(HALF-margin))/margin);
+    if(pz[i] < -HALF + margin) fz += bF * ((-HALF+margin-pz[i])/margin);
+
+    // Obstacle avoidance
+    if(obstacleGroup.visible){
+      for(let o=0;o<obstacles.length;o++){
+        const ob = obstacles[o];
+        const dx = px[i]-ob.x, dy = py[i]-ob.y, dz = pz[i]-ob.z;
+        const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        const clearance = ob.r + cfg.obstacleAvoidDist;
+        if(dist < clearance && dist > 0.01){
+          const strength = cfg.obstacleAvoidForce * (1 - dist/clearance);
+          const inv = 1/dist;
+          fx += dx*inv*strength;
+          fy += dy*inv*strength;
+          fz += dz*inv*strength;
+        }
+      }
+    }
+
+    // Clamp force
+    const fMag = Math.sqrt(fx*fx+fy*fy+fz*fz);
+    if(fMag > maxForce){
+      const s = maxForce/fMag;
+      fx*=s; fy*=s; fz*=s;
+    }
+
+    // Apply
+    vx[i] += fx; vy[i] += fy; vz[i] += fz;
+
+    // Clamp speed
+    const spd = Math.sqrt(vx[i]*vx[i]+vy[i]*vy[i]+vz[i]*vz[i]);
+    if(spd > maxSpd){
+      const s = maxSpd/spd;
+      vx[i]*=s; vy[i]*=s; vz[i]*=s;
+    }
+    // Minimum speed so boids don't stall
+    if(spd < maxSpd*0.3 && spd > 0.001){
+      const s = (maxSpd*0.3)/spd;
+      vx[i]*=s; vy[i]*=s; vz[i]*=s;
+    }
+
+    px[i] += vx[i]*dt*60;
+    py[i] += vy[i]*dt*60;
+    pz[i] += vz[i]*dt*60;
+
+    // Hard clamp
+    px[i] = Math.max(-HALF, Math.min(HALF, px[i]));
+    py[i] = Math.max(-HALF, Math.min(HALF, py[i]));
+    pz[i] = Math.max(-HALF, Math.min(HALF, pz[i]));
+  }
+}
+
+/* ───────────── UPDATE INSTANCE MATRICES ───────────── */
+function updateMatrices(){
+  const n = cfg.count;
+  for(let i=0;i<n;i++){
+    _pos.set(px[i], py[i], pz[i]);
+    _lookDir.set(vx[i], vy[i], vz[i]);
+    const len = _lookDir.length();
+    if(len > 0.001){
+      _lookDir.multiplyScalar(1/len);
+      _m.lookAt(_pos, _pos.clone().add(_lookDir), _up);
+      _q.setFromRotationMatrix(_m);
+    }
+    _dummy.position.copy(_pos);
+    _dummy.quaternion.copy(_q);
+    _dummy.scale.setScalar(1);
+    _dummy.updateMatrix();
+    instancedMesh.setMatrixAt(i, _dummy.matrix);
+  }
+  instancedMesh.instanceMatrix.needsUpdate = true;
+  instancedMesh.count = n;
+}
+
+/* ───────────── PARTICLES (ambient dust) ───────────── */
+const dustCount = 400;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount*3);
+for(let i=0;i<dustCount;i++){
+  dustPos[i*3]   = (Math.random()-0.5)*BOUND*1.5;
+  dustPos[i*3+1] = (Math.random()-0.5)*BOUND*1.5;
+  dustPos[i*3+2] = (Math.random()-0.5)*BOUND*1.5;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos,3));
+const dustMat = new THREE.PointsMaterial({color:0x334466, size:0.3, transparent:true, opacity:0.4, sizeAttenuation:true});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+/* ───────────── UI BINDINGS ───────────── */
+const $fps = document.getElementById('fps');
+const sliders = [
+  {id:'rCount', vid:'vCount', key:'count', int:true},
+  {id:'rSep',   vid:'vSep',   key:'separation'},
+  {id:'rAli',   vid:'vAli',   key:'alignment'},
+  {id:'rCoh',   vid:'vCoh',   key:'cohesion'},
+  {id:'rSpd',   vid:'vSpd',   key:'maxSpeed'},
+  {id:'rRad',   vid:'vRad',   key:'viewRadius', int:true},
+];
+for(const s of sliders){
+  const input = document.getElementById(s.id);
+  const val   = document.getElementById(s.vid);
+  input.addEventListener('input',()=>{
+    const v = s.int ? parseInt(input.value) : parseFloat(input.value);
+    cfg[s.key] = v;
+    val.textContent = s.int ? v : v.toFixed(1);
+    if(s.key==='count'){
+      // init new boids if count increased
+      for(let i=instancedMesh.count; i<v; i++) initBoid(i);
+    }
+  });
+}
+
+document.getElementById('btnObs').addEventListener('click', function(){
+  obstacleGroup.visible = !obstacleGroup.visible;
+  this.textContent = obstacleGroup.visible ? 'Hide Obstacles' : 'Show Obstacles';
+});
+
+document.getElementById('btnReset').addEventListener('click', ()=>{
+  for(let i=0;i<MAX_BOIDS;i++) initBoid(i);
+});
+
+/* ───────────── RESIZE ───────────── */
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ───────────── ANIMATION LOOP ───────────── */
+let prevTime = performance.now();
+let fpsFrames = 0, fpsTime = 0;
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min((now - prevTime)/1000, 0.05);  // cap dt
+  prevTime = now;
+
+  // FPS counter
+  fpsFrames++;
+  fpsTime += dt;
+  if(fpsTime >= 0.5){
+    $fps.textContent = `FPS: ${(fpsFrames/fpsTime)|0}  |  Boids: ${cfg.count}`;
+    fpsFrames = 0; fpsTime = 0;
+  }
+
+  updateBoids(dt);
+  updateMatrices();
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
